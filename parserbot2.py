@@ -12,7 +12,7 @@ load_dotenv()
 
 # НАСТРОЙКИ БОТА
 TARGET_SERVER_ID = 1536815201905541293  # ОСНОВНОЙ СЕРВЕР (куда выдаём роли)
-LOG_CHANNEL_ID = 1462605880959959040    # Канал для логов
+LOG_CHANNEL_ID = 1462605880959959040    # Канал для логов (нужно обновить)
 
 # КОНФИГУРАЦИЯ СЕРВЕРОВ-ИСТОЧНИКОВ
 # Формат: {ID_СЕРВЕРА: [список ролей для проверки]}
@@ -101,6 +101,9 @@ class RoleSyncBot:
         self.start_time = datetime.now()
         self.banned_users = {}
         self.last_check = datetime.now()
+        # Кэш для быстрой проверки ролей
+        self.role_cache = {}
+        self.cache_timeout = 60  # Кэш на 60 секунд
 
     async def log_to_channel(self, message, color=0x00ff00, view=None):
         try:
@@ -173,7 +176,14 @@ class RoleSyncBot:
             pass
 
     async def check_user_roles_fast(self, user_id):
-        """БЫСТРАЯ проверка ролей на всех серверах (минимальная задержка)"""
+        """БЫСТРАЯ проверка ролей с кэшированием"""
+        # Проверяем кэш
+        cache_key = f"roles_{user_id}"
+        if cache_key in self.role_cache:
+            cache_time, cached_result = self.role_cache[cache_key]
+            if (datetime.now() - cache_time).total_seconds() < self.cache_timeout:
+                return cached_result
+        
         result = {}
         has_any_roles = False
         
@@ -188,21 +198,26 @@ class RoleSyncBot:
                 result[source_server_id] = False
                 continue
             
-            # Проверяем наличие любой роли из списка
+            # Проверяем наличие ЛЮБОЙ роли из списка
             has_role = False
             for role_id in role_ids:
                 role = server.get_role(role_id)
                 if role and role in member.roles:
                     has_role = True
                     has_any_roles = True
-                    break  # Достаточно найти одну роль
+                    break
             
             result[source_server_id] = has_role
         
-        return {
+        final_result = {
             'server_roles': result,
             'has_any_roles': has_any_roles
         }
+        
+        # Сохраняем в кэш
+        self.role_cache[cache_key] = (datetime.now(), final_result)
+        
+        return final_result
 
     async def check_and_sync_user(self, user_id, username=None, check_ban=True):
         """БЫСТРАЯ синхронизация пользователя"""
@@ -217,7 +232,7 @@ class RoleSyncBot:
             
             username = username or target_member.display_name
             
-            # БЫСТРАЯ проверка ролей
+            # БЫСТРАЯ проверка ролей (с кэшем)
             role_check = await self.check_user_roles_fast(user_id)
             
             actions_performed = []
@@ -225,7 +240,6 @@ class RoleSyncBot:
             
             # Проверяем каждый сервер-источник
             for source_server_id, has_source_role in role_check['server_roles'].items():
-                # Получаем целевую роль для этого сервера
                 target_role_id = TARGET_ROLE_MAPPING.get(source_server_id)
                 if not target_role_id:
                     continue
@@ -235,30 +249,28 @@ class RoleSyncBot:
                     continue
                 
                 has_target_role = target_role in target_member.roles
+                if has_target_role:
+                    has_any_target_role = True
                 
                 if has_source_role and not has_target_role:
                     try:
-                        await target_member.add_roles(target_role, reason=f"Автосинхронизация - сервер {source_server_id}")
-                        actions_performed.append(f"✅ Выдана роль для сервера {source_server_id}")
+                        await target_member.add_roles(target_role, reason=f"Автосинхронизация")
+                        actions_performed.append(f"✅ + роль {source_server_id}")
                     except Exception:
                         pass
                 elif not has_source_role and has_target_role:
                     try:
-                        await target_member.remove_roles(target_role, reason=f"Автосинхронизация - нет ролей на сервере {source_server_id}")
-                        actions_performed.append(f"🗑️ Удалена роль для сервера {source_server_id}")
+                        await target_member.remove_roles(target_role, reason=f"Автосинхронизация")
+                        actions_performed.append(f"🗑️ - роль {source_server_id}")
                     except Exception:
                         pass
-                
-                if has_target_role:
-                    has_any_target_role = True
             
             # Логируем только если были действия
             if actions_performed:
                 log_msg = (
                     f"🔧 **Синхронизация**\n"
-                    f"• Пользователь: `{username}`\n"
-                    f"• ID: `{user_id}`\n"
-                    f"• Действия: {', '.join(actions_performed)}"
+                    f"• {username} (`{user_id}`)\n"
+                    f"• {', '.join(actions_performed)}"
                 )
                 await self.log_to_channel(log_msg, color=0x0099ff)
             
@@ -293,7 +305,6 @@ role_bot = RoleSyncBot()
 async def on_ready():
     print(f'✅ Бот {bot.user.name} запущен!')
     
-    # Проверяем доступность серверов
     target_server = bot.get_guild(TARGET_SERVER_ID)
     print(f'🎯 Основной сервер: {"✅" if target_server else "❌"}')
     
@@ -302,7 +313,7 @@ async def on_ready():
         server = bot.get_guild(server_id)
         print(f'   {server_id}: {"✅" if server else "❌"}')
     
-    activity = discord.Activity(type=discord.ActivityType.watching, name=f"{len(SOURCE_SERVERS)} серверов | 3 сек")
+    activity = discord.Activity(type=discord.ActivityType.watching, name=f"{len(SOURCE_SERVERS)} серверов | 2 сек")
     await bot.change_presence(activity=activity)
     
     await load_banned_users()
@@ -311,7 +322,7 @@ async def on_ready():
         f"🟢 **Role Sync Bot запущен**\n"
         f"• Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
         f"• Серверов-источников: {len(SOURCE_SERVERS)}\n"
-        f"• Интервал: 3 секунды\n"
+        f"• Интервал: 2 секунды\n"
         f"• Авторазбан: 10 минут"
     )
     await role_bot.log_to_channel(startup_msg, color=0x00ff00)
@@ -356,7 +367,7 @@ async def sync_all_users_once():
             if result:
                 actions += 1
             
-            await asyncio.sleep(0.02)  # Минимальная задержка
+            await asyncio.sleep(0.01)
         
         if log_channel:
             await log_channel.send(f"✅ **Проверка завершена!**\n• Проверено: {processed}\n• Действий: {actions}")
@@ -364,7 +375,7 @@ async def sync_all_users_once():
     except Exception:
         pass
 
-@tasks.loop(seconds=3)  # 3 секунды для быстрой синхронизации
+@tasks.loop(seconds=2)  # 2 секунды
 async def rapid_sync_task():
     try:
         await sync_all_users()
@@ -388,7 +399,7 @@ async def sync_all_users():
             if member.bot:
                 continue
             await role_bot.check_and_sync_user(member.id, check_ban=True)
-            await asyncio.sleep(0.01)  # Минимальная задержка
+            await asyncio.sleep(0.01)
     except Exception:
         pass
 
@@ -414,6 +425,11 @@ async def check_user_command(ctx, user: discord.Member = None):
     await ctx.send(f"🔍 Проверяю {user.mention}...")
     
     try:
+        # Очищаем кэш для этого пользователя
+        cache_key = f"roles_{user.id}"
+        if cache_key in role_bot.role_cache:
+            del role_bot.role_cache[cache_key]
+        
         role_check = await role_bot.check_user_roles_fast(user.id)
         
         target_server = bot.get_guild(TARGET_SERVER_ID)
@@ -454,7 +470,7 @@ async def stats_command(ctx):
         f"• Пользователей: {total_members}\n"
         f"• Забанено: {banned_count}\n"
         f"• Серверов-источников: {len(SOURCE_SERVERS)}\n"
-        f"• Интервал: 3 секунды\n"
+        f"• Интервал: 2 секунды\n"
         f"• Время работы: {datetime.now() - role_bot.start_time}"
     )
     await ctx.send(stats_msg)
@@ -469,6 +485,9 @@ async def sync_now_command(ctx):
         if not target_server:
             await ctx.send("❌ Целевой сервер не доступен")
             return
+        
+        # Очищаем кэш
+        role_bot.role_cache.clear()
         
         members = [member for member in target_server.members if not member.bot]
         total_count = len(members)
@@ -495,6 +514,13 @@ async def sync_now_command(ctx):
         
     except Exception as e:
         await ctx.send(f"❌ Ошибка: {e}")
+
+@bot.command(name='clear_cache')
+@commands.has_permissions(administrator=True)
+async def clear_cache_command(ctx):
+    """Очистить кэш ролей"""
+    role_bot.role_cache.clear()
+    await ctx.send("✅ Кэш ролей очищен!")
 
 # Запуск бота
 def main():
