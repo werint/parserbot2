@@ -37,6 +37,13 @@ SOURCE_SERVERS = {
     ],
     848325149191307264: [   # Сервер #4
         1277918655639846912
+    ],
+    1150420551324672030: [  # Сервер #5 (НОВЫЙ)
+        1150422789778591764,
+        1251618206905405573
+    ],
+    1318937492858343474: [  # Сервер #6 (НОВЫЙ)
+        1318951502491942955
     ]
 }
 
@@ -45,7 +52,9 @@ TARGET_ROLE_MAPPING = {
     1379837805366087710: 1536868470447284234,  # Сервер #1 -> роль
     1269934482044096533: 1536869777774219401,  # Сервер #2 -> роль
     1003525677640851496: 1536868334346313848,  # Сервер #3 -> роль
-    848325149191307264:  1536868392974422036   # Сервер #4 -> роль
+    848325149191307264:  1536868392974422036,  # Сервер #4 -> роль
+    1150420551324672030: 1537435028559241336,  # Сервер #5 -> роль (НОВАЯ)
+    1318937492858343474: 1537435159757070457   # Сервер #6 -> роль (НОВАЯ)
 }
 
 # Настройка интентов
@@ -216,6 +225,11 @@ class RoleSyncBot:
             
             username = username or target_member.display_name
             
+            # Проверяем права бота
+            bot_member = target_server.get_member(bot.user.id)
+            if not bot_member:
+                return False
+            
             # Проверяем роли на всех серверах-источниках
             role_check = await self.check_user_roles(user_id)
             
@@ -231,6 +245,10 @@ class RoleSyncBot:
                 if not target_role:
                     continue
                 
+                # Проверяем, может ли бот управлять этой ролью
+                if target_role >= bot_member.top_role:
+                    continue
+                
                 has_target_role = target_role in target_member.roles
                 
                 # Если есть роль на сервере-источнике, но нет на основном -> выдаём
@@ -238,16 +256,16 @@ class RoleSyncBot:
                     try:
                         await target_member.add_roles(target_role, reason=f"Есть роль на сервере {source_server_id}")
                         actions_performed.append(f"✅ Выдана роль {target_role.name}")
-                    except Exception as e:
-                        await self.log_to_channel(f"❌ Ошибка выдачи роли: {e}", color=0xff0000)
+                    except Exception:
+                        pass
                 
                 # Если нет роли на сервере-источнике, но есть на основном -> забираем
                 elif not has_source_role and has_target_role:
                     try:
                         await target_member.remove_roles(target_role, reason=f"Нет роли на сервере {source_server_id}")
                         actions_performed.append(f"🗑️ Удалена роль {target_role.name}")
-                    except Exception as e:
-                        await self.log_to_channel(f"❌ Ошибка удаления роли: {e}", color=0xff0000)
+                    except Exception:
+                        pass
             
             # Логируем действия
             if actions_performed:
@@ -262,13 +280,13 @@ class RoleSyncBot:
             # БАН: если нет ролей НИ НА ОДНОМ сервере-источнике
             if check_ban and not role_check['has_any_roles']:
                 if user_id not in self.banned_users:
-                    await self.ban_user(user_id, username)
-                    return True
+                    if bot_member.guild_permissions.ban_members:
+                        await self.ban_user(user_id, username)
+                        return True
             
             return len(actions_performed) > 0
             
-        except Exception as e:
-            await self.log_to_channel(f"❌ Ошибка синхронизации {user_id}: {e}", color=0xff0000)
+        except Exception:
             return False
 
     async def parse_snitch_message(self, message):
@@ -564,6 +582,44 @@ async def check_bans(ctx):
             await ctx.send("✅ Нет забаненных пользователей")
     except Exception as e:
         await ctx.send(f"❌ Ошибка: {e}")
+
+@bot.command(name='servers')
+@commands.has_permissions(administrator=True)
+async def list_servers_command(ctx):
+    """Показать все серверы, где есть бот"""
+    servers = bot.guilds
+    
+    embed = discord.Embed(
+        title="📊 Серверы бота",
+        color=0x0099ff,
+        timestamp=datetime.now()
+    )
+    
+    for server in servers:
+        is_target = "⭐ ОСНОВНОЙ" if server.id == TARGET_SERVER_ID else ""
+        is_source = "📌 ИСТОЧНИК" if server.id in SOURCE_SERVERS else ""
+        is_configured = "✅" if server.id in SOURCE_SERVERS or server.id == TARGET_SERVER_ID else "❌"
+        
+        # Проверяем права бота на сервере
+        bot_member = server.get_member(bot.user.id)
+        if bot_member:
+            can_manage_roles = "✅" if bot_member.guild_permissions.manage_roles else "❌"
+            can_ban = "✅" if bot_member.guild_permissions.ban_members else "❌"
+        else:
+            can_manage_roles = "❌"
+            can_ban = "❌"
+        
+        embed.add_field(
+            name=f"{server.name}",
+            value=f"ID: `{server.id}`\n"
+                  f"Участников: {server.member_count}\n"
+                  f"Статус: {is_configured} {is_target} {is_source}\n"
+                  f"Управление ролями: {can_manage_roles}\n"
+                  f"Бан: {can_ban}",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
 
 # Запуск бота
 def main():
