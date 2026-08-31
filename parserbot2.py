@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TARGET_SERVER_ID = 1543991245594955816
-LOG_CHANNEL_ID = 1544023220808716438
-OWNER_ID = 427922282959077386
+LOG_CHANNEL_ID = 1543993492294864966
+OWNER_ID = 474701198765523000
 
 SOURCE_SERVERS = {
     1269934482044096533: [
@@ -41,7 +41,7 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-class AddRoleModal(discord.ui.Modal, title="Добавить отслеживаемую роль"):
+class AddRoleModal(discord.ui.Modal, title="Добавить/Настроить роль"):
     target_role_id = discord.ui.TextInput(
         label="ID роли на основном сервере",
         placeholder="Введите ID роли, которая уже есть на сервере...",
@@ -86,7 +86,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await setup_server(interaction)
     
-    @discord.ui.button(label="➕ Добавить роль", style=discord.ButtonStyle.success, custom_id="add_role_btn", row=0)
+    @discord.ui.button(label="➕ Добавить/Настроить роль", style=discord.ButtonStyle.success, custom_id="add_role_btn", row=0)
     async def add_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = AddRoleModal()
         await interaction.response.send_modal(modal)
@@ -328,6 +328,32 @@ class RoleSyncBot:
 
 role_bot = RoleSyncBot()
 
+async def setup_role_channels(guild: discord.Guild, role: discord.Role):
+    """Настраивает доступ к каналам для роли"""
+    try:
+        main_category = discord.utils.get(guild.categories, name="MAIN")
+        high_category = discord.utils.get(guild.categories, name="HIGH")
+        
+        if main_category:
+            await main_category.set_permissions(role, view_channel=True)
+        if high_category:
+            await high_category.set_permissions(role, view_channel=True)
+        
+        for channel in guild.channels:
+            if isinstance(channel, discord.TextChannel):
+                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
+                    await channel.set_permissions(role, view_channel=True, read_messages=True)
+        
+        for channel in guild.channels:
+            if isinstance(channel, discord.VoiceChannel):
+                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
+                    await channel.set_permissions(role, view_channel=True, connect=True)
+        
+        return True
+    except Exception as e:
+        print(f"Ошибка настройки каналов: {e}")
+        return False
+
 async def setup_server(interaction: discord.Interaction):
     try:
         guild = interaction.guild
@@ -398,17 +424,32 @@ async def add_role(interaction: discord.Interaction, target_role_id: str):
             return
         
         target_role_id_int = int(target_role_id)
-        
-        for source_id, t_id in TARGET_ROLE_MAPPING.items():
-            if t_id == target_role_id_int:
-                await interaction.followup.send("❌ Эта роль уже отслеживается!", ephemeral=True)
-                return
-        
         target_role = guild.get_role(target_role_id_int)
+        
         if not target_role:
             await interaction.followup.send("❌ Роль не найдена на сервере!", ephemeral=True)
             return
         
+        # Проверяем, отслеживается ли уже эта роль
+        is_tracked = False
+        for source_id, t_id in TARGET_ROLE_MAPPING.items():
+            if t_id == target_role_id_int:
+                is_tracked = True
+                break
+        
+        if is_tracked:
+            # Роль уже отслеживается - просто настраиваем доступ к каналам
+            await setup_role_channels(guild, target_role)
+            
+            embed = discord.Embed(
+                title="✅ Доступ к каналам настроен!",
+                description=f"Для роли {target_role.mention} настроен доступ ко всем каналам.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        # Если роль не отслеживается - показываем список серверов для привязки
         source_servers_list = "\n".join([f"`{s_id}` - {bot.get_guild(s_id).name if bot.get_guild(s_id) else 'Недоступен'}" for s_id in SOURCE_SERVERS.keys()])
         
         embed = discord.Embed(
@@ -419,6 +460,7 @@ async def add_role(interaction: discord.Interaction, target_role_id: str):
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
+        # Сохраняем ID роли для следующего шага
         modal = SourceServerModal()
         await interaction.followup.send_modal(modal)
         
@@ -443,39 +485,71 @@ async def add_role_with_source(interaction: discord.Interaction, source_server_i
             await interaction.followup.send("❌ Этот сервер уже привязан к другой роли!", ephemeral=True)
             return
         
-        target_role = guild.get_role(int(interaction.message.content))
-        if not target_role:
-            await interaction.followup.send("❌ Роль не найдена!", ephemeral=True)
+        # Получаем ID роли из предыдущего шага (хранится в контексте)
+        # Для простоты используем последнюю введенную роль
+        # В реальном коде нужно сохранять состояние между шагами
+        
+        # Показываем сообщение, что нужно ввести ID роли заново
+        embed = discord.Embed(
+            title="⚠️ Введите ID роли",
+            description="Пожалуйста, введите ID роли ещё раз в модальном окне.",
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+        # Создаем модальное окно для ввода ID роли
+        class FinalRoleModal(discord.ui.Modal, title="Введите ID роли"):
+            role_id = discord.ui.TextInput(
+                label="ID роли на основном сервере",
+                placeholder="Введите ID роли...",
+                required=True,
+                max_length=20
+            )
+            
+            async def on_submit(self, interaction: discord.Interaction):
+                await interaction.response.defer(ephemeral=True)
+                await finish_add_role(interaction, source_server_id, self.role_id.value)
+        
+        await interaction.followup.send_modal(FinalRoleModal())
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+
+async def finish_add_role(interaction: discord.Interaction, source_server_id: int, target_role_id: str):
+    try:
+        guild = interaction.guild
+        
+        if not target_role_id.isdigit():
+            await interaction.followup.send("❌ ID роли должен быть числом", ephemeral=True)
             return
         
-        TARGET_ROLE_MAPPING[source_server_id_int] = target_role.id
+        target_role_id_int = int(target_role_id)
+        target_role = guild.get_role(target_role_id_int)
         
-        main_category = discord.utils.get(guild.categories, name="MAIN")
-        high_category = discord.utils.get(guild.categories, name="HIGH")
+        if not target_role:
+            await interaction.followup.send("❌ Роль не найдена на сервере!", ephemeral=True)
+            return
         
-        if main_category:
-            await main_category.set_permissions(target_role, view_channel=True)
-        if high_category:
-            await high_category.set_permissions(target_role, view_channel=True)
+        # Проверяем, не привязана ли уже эта роль
+        for s_id, t_id in TARGET_ROLE_MAPPING.items():
+            if t_id == target_role_id_int:
+                await interaction.followup.send("❌ Эта роль уже отслеживается!", ephemeral=True)
+                return
         
-        for channel in guild.channels:
-            if isinstance(channel, discord.TextChannel):
-                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
-                    await channel.set_permissions(target_role, view_channel=True, read_messages=True)
+        # Добавляем в маппинг
+        TARGET_ROLE_MAPPING[source_server_id] = target_role_id_int
         
-        for channel in guild.channels:
-            if isinstance(channel, discord.VoiceChannel):
-                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
-                    await channel.set_permissions(target_role, view_channel=True, connect=True)
+        # Настраиваем доступ к каналам
+        await setup_role_channels(guild, target_role)
         
-        source_guild = bot.get_guild(source_server_id_int)
-        source_roles = SOURCE_SERVERS[source_server_id_int]
+        source_guild = bot.get_guild(source_server_id)
+        source_roles = SOURCE_SERVERS[source_server_id]
         
         embed = discord.Embed(
-            title="✅ Роль добавлена!",
+            title="✅ Роль добавлена и настроена!",
             color=discord.Color.green()
         )
-        embed.add_field(name="Сервер-источник", value=source_guild.name if source_guild else str(source_server_id_int), inline=True)
+        embed.add_field(name="Сервер-источник", value=source_guild.name if source_guild else str(source_server_id), inline=True)
         embed.add_field(name="Роли-источники", value=f"`{', '.join(map(str, source_roles))}`", inline=True)
         embed.add_field(name="Целевая роль", value=target_role.mention, inline=False)
         embed.add_field(name="Доступ к каналам", value="✅ Настроен", inline=False)
