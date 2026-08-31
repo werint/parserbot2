@@ -331,23 +331,55 @@ role_bot = RoleSyncBot()
 async def setup_role_channels(guild: discord.Guild, role: discord.Role):
     """Настраивает доступ к каналам для роли"""
     try:
+        # Находим категории
         main_category = discord.utils.get(guild.categories, name="MAIN")
         high_category = discord.utils.get(guild.categories, name="HIGH")
         
+        # Даём доступ к категории MAIN, но не к HIGH
         if main_category:
             await main_category.set_permissions(role, view_channel=True)
         if high_category:
-            await high_category.set_permissions(role, view_channel=True)
+            await high_category.set_permissions(role, view_channel=False)
         
+        # Настраиваем текстовые каналы
         for channel in guild.channels:
-            if isinstance(channel, discord.TextChannel):
-                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
-                    await channel.set_permissions(role, view_channel=True, read_messages=True)
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            
+            if not channel.category:
+                continue
+            
+            # Только каналы в MAIN
+            if channel.category.name != "MAIN":
+                continue
+            
+            # Настройка для NEWS - только чтение
+            if channel.name == "news":
+                await channel.set_permissions(role, view_channel=True, read_messages=True, send_messages=False, mention_everyone=False)
+            
+            # Настройка для FLOOD - чтение и запись
+            elif channel.name == "flood":
+                await channel.set_permissions(role, view_channel=True, read_messages=True, send_messages=True, mention_everyone=False)
+            
+            # Настройка для TAGS - чтение и запись
+            elif channel.name == "tags":
+                await channel.set_permissions(role, view_channel=True, read_messages=True, send_messages=True, mention_everyone=False)
+            
+            # Настройка для MEDIA - чтение и запись
+            elif channel.name == "media":
+                await channel.set_permissions(role, view_channel=True, read_messages=True, send_messages=True, mention_everyone=False)
         
+        # Настраиваем голосовые каналы
         for channel in guild.channels:
-            if isinstance(channel, discord.VoiceChannel):
-                if channel.category and channel.category.name in ["MAIN", "HIGH"]:
-                    await channel.set_permissions(role, view_channel=True, connect=True)
+            if not isinstance(channel, discord.VoiceChannel):
+                continue
+            
+            if not channel.category:
+                continue
+            
+            # Только голосовые каналы в MAIN (voice 1-5)
+            if channel.category.name == "MAIN" and channel.name.startswith("voice"):
+                await channel.set_permissions(role, view_channel=True, connect=True, speak=True, stream=False)
         
         return True
     except Exception as e:
@@ -372,23 +404,23 @@ async def setup_server(interaction: discord.Interaction):
         main_category = await guild.create_category(name="MAIN")
         high_category = await guild.create_category(name="HIGH")
         
-        base_overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False)
-        }
+        # Создаем текстовые каналы
+        news = await main_category.create_text_channel(name="news")
+        flood = await main_category.create_text_channel(name="flood")
+        tags = await main_category.create_text_channel(name="tags")
+        media = await main_category.create_text_channel(name="media")
         
-        news = await main_category.create_text_channel(name="news", overwrites=base_overwrites)
-        flood = await main_category.create_text_channel(name="flood", overwrites=base_overwrites)
-        tags = await main_category.create_text_channel(name="tags", overwrites=base_overwrites)
-        media = await main_category.create_text_channel(name="media", overwrites=base_overwrites)
-        logs = await high_category.create_text_channel(name="logs", overwrites=base_overwrites)
-        high_flood = await high_category.create_text_channel(name="high-flood", overwrites=base_overwrites)
+        # HIGH каналы (без доступа для обычных ролей)
+        logs = await high_category.create_text_channel(name="logs")
+        high_flood = await high_category.create_text_channel(name="high-flood")
         
+        # Создаем голосовые каналы
         voice_channels = []
-        for i in range(1, 5):
-            voice = await main_category.create_voice_channel(name=f"voice {i}", overwrites=base_overwrites)
+        for i in range(1, 6):
+            voice = await main_category.create_voice_channel(name=f"voice {i}")
             voice_channels.append(voice)
         
-        high_voice = await high_category.create_voice_channel(name="high-voice", overwrites=base_overwrites)
+        high_voice = await high_category.create_voice_channel(name="high-voice")
         
         embed = discord.Embed(
             title="✅ Сервер настроен!",
@@ -401,7 +433,7 @@ async def setup_server(interaction: discord.Interaction):
             inline=False
         )
         embed.add_field(
-            name="📁 Категория HIGH",
+            name="📁 Категория HIGH (без доступа)",
             value=f"{logs.mention} {high_flood.mention} {high_voice.mention}",
             inline=False
         )
@@ -443,7 +475,10 @@ async def add_role(interaction: discord.Interaction, target_role_id: str):
             
             embed = discord.Embed(
                 title="✅ Доступ к каналам настроен!",
-                description=f"Для роли {target_role.mention} настроен доступ ко всем каналам.",
+                description=f"Для роли {target_role.mention} настроен доступ:\n"
+                           f"• 📰 News: только чтение\n"
+                           f"• 💬 Flood, Tags, Media: чтение и отправка\n"
+                           f"• 🎤 Voice 1-5: подключение и разговор",
                 color=discord.Color.green()
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -460,7 +495,6 @@ async def add_role(interaction: discord.Interaction, target_role_id: str):
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # Сохраняем ID роли для следующего шага
         modal = SourceServerModal()
         await interaction.followup.send_modal(modal)
         
@@ -485,11 +519,6 @@ async def add_role_with_source(interaction: discord.Interaction, source_server_i
             await interaction.followup.send("❌ Этот сервер уже привязан к другой роли!", ephemeral=True)
             return
         
-        # Получаем ID роли из предыдущего шага (хранится в контексте)
-        # Для простоты используем последнюю введенную роль
-        # В реальном коде нужно сохранять состояние между шагами
-        
-        # Показываем сообщение, что нужно ввести ID роли заново
         embed = discord.Embed(
             title="⚠️ Введите ID роли",
             description="Пожалуйста, введите ID роли ещё раз в модальном окне.",
@@ -497,7 +526,6 @@ async def add_role_with_source(interaction: discord.Interaction, source_server_i
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # Создаем модальное окно для ввода ID роли
         class FinalRoleModal(discord.ui.Modal, title="Введите ID роли"):
             role_id = discord.ui.TextInput(
                 label="ID роли на основном сервере",
@@ -530,16 +558,13 @@ async def finish_add_role(interaction: discord.Interaction, source_server_id: in
             await interaction.followup.send("❌ Роль не найдена на сервере!", ephemeral=True)
             return
         
-        # Проверяем, не привязана ли уже эта роль
         for s_id, t_id in TARGET_ROLE_MAPPING.items():
             if t_id == target_role_id_int:
                 await interaction.followup.send("❌ Эта роль уже отслеживается!", ephemeral=True)
                 return
         
-        # Добавляем в маппинг
         TARGET_ROLE_MAPPING[source_server_id] = target_role_id_int
         
-        # Настраиваем доступ к каналам
         await setup_role_channels(guild, target_role)
         
         source_guild = bot.get_guild(source_server_id)
@@ -552,7 +577,11 @@ async def finish_add_role(interaction: discord.Interaction, source_server_id: in
         embed.add_field(name="Сервер-источник", value=source_guild.name if source_guild else str(source_server_id), inline=True)
         embed.add_field(name="Роли-источники", value=f"`{', '.join(map(str, source_roles))}`", inline=True)
         embed.add_field(name="Целевая роль", value=target_role.mention, inline=False)
-        embed.add_field(name="Доступ к каналам", value="✅ Настроен", inline=False)
+        embed.add_field(
+            name="Настроенные доступы",
+            value="📰 News: только чтение\n💬 Flood, Tags, Media: чтение и отправка\n🎤 Voice 1-5: подключение и разговор",
+            inline=False
+        )
         
         await interaction.followup.send(embed=embed, ephemeral=True)
         
